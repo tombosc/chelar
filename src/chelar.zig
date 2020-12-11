@@ -47,7 +47,6 @@ fn recursiveUnformatCast(comptime T: type, parsed: *T, unformatted: *Unformat(T)
             if (is_formatted_struct) {
                 const formatted_child = @ptrCast(
                     *Unformat(T),
-                    //*@TypeOf(parsed.*).child_type,
                     &(parsed.*.child),
                 );
                 unformatted.* = formatted_child.*;
@@ -308,15 +307,10 @@ pub fn Join(comptime T: type, comptime sep: str) type {
 
 /// Recursively de-encapsulate format structs obtained using formatters like Join
 pub fn Unformat(comptime T: type) type {
-    //comptime print("Call unformat\n", .{});
-    // TODO: When Unformat(T) is called, can we fill in hidden decls
-    // in T (ensuring they're hidden somehow?) so that we can name intermediary
-    // structs? No, I don't think so. @Type doesn't work with decls and I'm not
-    // sure it would get a name anyways.
     comptime var typeinfo = @typeInfo(T);
     switch (typeinfo) {
         .Struct => {
-            const is_parse_struct: bool = isFormattedStruct(T);
+            comptime const is_parse_struct: bool = isFormattedStruct(T);
             if (is_parse_struct) {
                 return Unformat(T.child_type);
             } else {
@@ -334,19 +328,6 @@ pub fn Unformat(comptime T: type) type {
                         fields[i].default_value = null; //nested_type
                     }
                 }
-                // also, add declarations for the structs to have a name
-                // const Declaration = std.builtin.TypeInfo.Declaration;
-                // comptime const n_decls = typeinfo.Struct.decls.len;
-                // comptime var new_decls: [n_decls + 1]Declaration = undefined;
-                // std.mem.copy(Declaration, new_decls[0..n_decls], typeinfo.Struct.decls[0..]);
-                // var future_typeinfo = Declaration.Data{
-                //     .Type = @This(),
-                // };
-                // new_decls[n_decls] = Declaration{
-                //     .name = "structure_la_la",
-                //     .is_pub = true,
-                //     .data = future_typeinfo,
-                // };
                 if (!fields_have_changed) {
                     return T;
                 }
