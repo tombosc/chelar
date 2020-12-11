@@ -5,6 +5,8 @@ const str = []const u8;
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
+const tools = @import("tools.zig");
+const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
 
 pub const Error = error{
     ParseError,
@@ -216,29 +218,6 @@ test "enum parser" {
     const pair = try Parser(Pair)(alloc, &std.mem.tokenize("ok 49", " "));
     expect(pair.res == .ok);
     expect(pair.a == 49);
-}
-
-fn recursivePrintTypeInfoStruct(comptime T: type, comptime depth: u8) void {
-    comptime var i = 0;
-    inline while (i < depth) : (i += 1) {
-        print(">", .{});
-    }
-    print("{}\n", .{@typeInfo(T)});
-    if (@typeInfo(T) == .Struct) {
-        inline for (@typeInfo(T).Struct.fields) |f| {
-            recursivePrintTypeInfoStruct(f.field_type, depth + 1);
-        }
-    } else if (@typeInfo(T) == .Pointer) {
-        recursivePrintTypeInfoStruct(
-            @typeInfo(T).Pointer.child,
-            depth + 1,
-        );
-    } else if (@typeInfo(T) == .Optional) {
-        recursivePrintTypeInfoStruct(
-            @typeInfo(T).Optional.child,
-            depth + 1,
-        );
-    }
 }
 
 fn structFirstFieldType(comptime T: type) type {
