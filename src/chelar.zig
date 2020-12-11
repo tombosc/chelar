@@ -1,12 +1,15 @@
 const std = @import("std");
 const enum_parser = @import("enum_parser.zig");
 const expect = std.testing.expect;
+const expectError = std.testing.expectError;
 const str = []const u8;
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
 const tools = @import("tools.zig");
 const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
+
+pub const TypeError = error{TypeError};
 
 pub const Error = error{
     ParseError,
@@ -263,25 +266,35 @@ test "array struct parser" {
     expect(pair_slice[0].a == 6 and pair_slice[1].a == 999);
 }
 
-/// private, indicate that struct encapsulates various tools to parse
+/// Flag indicating that struct is a "formatting struct", i.e. that it
+/// encapsulates various informations for parsing
 const ParseStruct = enum {
     parse_struct,
 };
 
-// TODO explain format structs
-
-pub fn Join(comptime T: type, comptime sep: str) type {
+/// Encapsulates a complex type like slice, array or struct into another struct
+/// that defines how it can be parsed. It simply defines the separator
+/// between items of the slices/arrays, or fields of the structs.
+pub fn Join(comptime T: type, comptime sep: str) TypeError!type {
+    const tinfo = @typeInfo(T);
+    switch (tinfo) {
+        .Struct, .Pointer, .Array => {},
+        else => return TypeError.TypeError,
+    }
     return struct {
         child: T,
-        // @"0": T,
         const parse_struct: ParseStruct = .parse_struct;
         const child_type: type = T;
 
         fn tokenize(val: str) std.mem.TokenIterator {
-            // print("Tok {}\n", .{val});
+            // TODO optional separator for character-level parsing?
             return std.mem.tokenize(val, sep);
         }
     };
+}
+
+test "join errors" {
+    expectError(TypeError.TypeError, Join(u32, " "));
 }
 
 /// Recursively de-encapsulate format structs obtained using formatters like Join
