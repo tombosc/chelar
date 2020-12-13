@@ -1,10 +1,10 @@
 # chelar
 
-Create simple parsers in your [zig](https://ziglang.org/) projects for data structures, at compile-time. Warning: Hacky and experimental. 
+Create simple parsers in [Zig](https://ziglang.org/) projects at compile-time. Warning: Hacky and experimental. 
 
-Here is an example taken (modified) from [advent of code 2020, day 8](https://adventofcode.com/):
+Example taken (modified) from [advent of code 2020](https://adventofcode.com/), day 8:
 
-```
+```Zig
 test "AoC day8 (modified)" {
     const alloc = std.testing.allocator;
     const Opcode = enum {
@@ -48,13 +48,13 @@ To be more precise, here is the correspondence between types and regex/formal gr
 - `[]T`: regex `T*`
 - `[19]T`: regex `T{19}`
 - `enum { a, b, c }`: regex `(a|b|c)`
-- `const X = struct { a: T, b: U}`: formal grammar rule `X → TU` (**but** does not handle `U = *X` for instance! not recursive/context-free languages!)
+- `const X = struct { a: T, b: U}`: formal grammar rule `X → TU` (**but** does not handle recursive languages, i.e. setting the type `U` to `*X` for instance)
 
-The parser is a very stupid, WIP [recursive descent parser](https://en.wikipedia.org/wiki/Recursive_descent_parser) with **many**, **huge** caveats:
+The parser is a very naive and WIP [recursive descent parser](https://en.wikipedia.org/wiki/Recursive_descent_parser) with **many** caveats:
 
-- does not backtrack! It cannot even parse data type `struct { a: ?u32, b: u32 }` correctly. 
-- does not deal with runtime errors gracefully.
-- does not deal with errors in building parser at compile time. For instance, right now `Join(u32, " ")` could fail but doesn't, because `try` segfault in structs. If `Join` can fail, the syntax slightly more cumbersome and we have to declare all intermediary types used nested. Maybe not a bad tradeoff...
+- does not backtrack, so it cannot even parse data type `struct { a: ?u32, b: u32 }` correctly
+- does not deal with runtime errors gracefully
+- does not deal with compile time errors of types. For instance, `Join(u32, " ")` should fail but doesn't. That's because either we write `struct { a: try Join(u32, " "), ...` and it segfaults, or we have to declare all intermediary types used nested.
 
 Right now, the way it is implemented is that `Join([]u32, sep)` creates a new type `struct { child: []u32, const tokenizer = std.mem.tokenize(val, sep); }`. Not great. We could avoid deeper nestings if we could reify types with declarations as [proposed here (#6709)](https://github.com/ziglang/zig/issues/6709).
 
