@@ -48,7 +48,7 @@ To be more precise, here is the correspondence between types and regex/formal gr
 - `[]T`: regex `T*`
 - `[19]T`: regex `T{19}`
 - `enum { a, b, c }`: regex `(a|b|c)`
-- `const X = struct { a: T, b: U}`: formal grammar rule `X → TU` (**but** not recursive! see below)
+- `const X = struct { a: T, b: U}`: formal grammar rule `X → TU` (**but** does not handle `U = *X` for instance! not recursive/context-free languages!)
 
 The parser is a very stupid, WIP [recursive descent parser](https://en.wikipedia.org/wiki/Recursive_descent_parser) with **many**, **huge** caveats:
 
@@ -61,7 +61,8 @@ Right now, the way it is implemented is that `Join([]u32, sep)` creates a new ty
 We could have more cool stuff, like:
 
 - Proper error handling, not sure how yet.
+- Tagged unions.
+- Handle recursive languages by dealing with pointers.
 - A new type transformer `Ignore(T)`, corresponding to data that we don't want to capture. For example, if a struct has a first field `a: Ignore(u32)`, it means we need to parse it but do not store it.
 - A new type transformer `Wrap(T, '{', '}')`.
-- Tagged unions.
 - Serialization? Should be quite straightforward.
