@@ -1,6 +1,8 @@
 const std = @import("std");
 const expect = std.testing.expect;
 const str = []const u8;
+const tools = @import("tools.zig");
+const streql = tools.streql;
 
 /// A "formatted struct" encapsulates a complex type like slice, array or struct
 /// into a new struct that defines how it can be parsed.
@@ -23,9 +25,9 @@ pub fn Join(comptime T: type, comptime sep: str) type {
     return struct {
         child: T,
         const fmt_struct: FormattedStruct = .formatted_struct;
-        const child_type: type = T;
+        pub const child_type: type = T;
 
-        fn tokenize(val: str) std.mem.TokenIterator {
+        pub fn tokenize(val: str) std.mem.TokenIterator {
             return std.mem.tokenize(val, sep);
         }
     };
@@ -45,7 +47,7 @@ pub fn isFormattedStruct(comptime T: type) bool {
 
 /// When we parse a formatted struct of type T, we want to return the unformatted type Unformat(T). Indeed, formatted types are cumbersome (they add one nesting level per formatted struct) and are not what the user want to obtain in the end.
 /// This helper casts all the a new type cast converts
-fn castUnformatRecur(comptime T: type, parsed: *T, unformatted: *Unformat(T)) void {
+pub fn castUnformatRecur(comptime T: type, parsed: *T, unformatted: *Unformat(T)) void {
     const typeinfo_T = @typeInfo(T);
     switch (typeinfo_T) {
         .Struct => {

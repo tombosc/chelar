@@ -1,4 +1,5 @@
 const std = @import("std");
+const str = []const u8;
 const print = std.debug.print;
 
 pub fn recursivePrintTypeInfoStruct(comptime T: type, comptime depth: u8) void {
@@ -22,4 +23,8 @@ pub fn recursivePrintTypeInfoStruct(comptime T: type, comptime depth: u8) void {
             depth + 1,
         );
     }
+}
+
+pub fn streql(str1: str, str2: str) bool {
+    return std.mem.eql(u8, str1, str2);
 }

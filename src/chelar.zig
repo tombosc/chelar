@@ -8,7 +8,11 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
 const tools = @import("tools.zig");
+const streql = tools.streql;
 const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
+
+pub const Join = fmt.Join;
+pub const Unformat = fmt.Unformat;
 
 pub const Error = error{
     ParseError,
@@ -46,7 +50,7 @@ pub fn ParserStr(comptime T: type) (fn (?*Allocator, str) Error!Unformat(T)) {
             // 1. not sure if this is safe,
             // 2. is there a way to copy data without realloc an Unformat(T)?
             var unformatted: Unformat(T) = undefined;
-            castUnformatRecur(T, &parsed, &unformatted);
+            fmt.castUnformatRecur(T, &parsed, &unformatted);
             return unformatted;
         }
     }.parseWrap;
@@ -97,8 +101,8 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                     }
                 },
                 .Struct => {
-                    comptime const is_formatted_struct: bool = isFormattedStruct(t);
-                    if (is_formatted_struct) {
+                    comptime const is_fmt = fmt.isFormattedStruct(t);
+                    if (is_fmt) {
                         var sub_iter: std.mem.TokenIterator = undefined;
                         if (iter.next()) |val| {
                             sub_iter = t.tokenize(val);
@@ -156,23 +160,23 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
     }.parse;
 }
 
-fn streql(str1: str, str2: str) bool {
-    return std.mem.eql(u8, str1, str2);
+// helpers
+
+fn structFirstFieldType(comptime T: type) type {
+    return @typeInfo(T).Struct.fields[0].field_type;
 }
 
-test "int slice parser" {
+// tests
+
+test "parser slice int" {
     var alloc = std.testing.allocator;
     const p = try Parser([]u32)(alloc, &std.mem.tokenize("1 3 5 3", " "));
     defer alloc.free(p);
     expect(p.len == 4);
     expect((p[0] == 1) and (p[1] == 3) and (p[2] == 5) and (p[3] == 3));
-
-    const q = try ParserStr(Join([]u32, " "))(alloc, "1 3 5 3");
-    defer alloc.free(q);
-    expect((q[0] == 1) and (q[1] == 3) and (q[2] == 5) and (q[3] == 3));
 }
 
-test "struct parser" {
+test "parser struct" {
     var alloc = std.testing.allocator;
     const Pair = struct {
         a: u32,
@@ -183,7 +187,7 @@ test "struct parser" {
     expect(pair.b == 49);
 }
 
-test "enum parser" {
+test "parser struct enum" {
     var alloc = std.testing.allocator;
     const Result = enum {
         ok,
@@ -198,32 +202,7 @@ test "enum parser" {
     expect(pair.a == 49);
 }
 
-fn structFirstFieldType(comptime T: type) type {
-    return @typeInfo(T).Struct.fields[0].field_type;
-}
-
-test "join parser" {
-    var alloc = std.testing.allocator;
-    const Pair = struct {
-        a: u32,
-        b: u32,
-    };
-    const JoinPair = Join(Pair, " ");
-    // TODO doesn't work consistently, bugs with print at comptime?
-    //print("JoinPair:\n", .{});
-    //recursivePrintTypeInfoStruct(JoinPair, 0);
-    //print("Orig:\n", .{});
-    //recursivePrintTypeInfoStruct(Pair, 0);
-    comptime expect(isFormattedStruct(JoinPair));
-    comptime expect(structFirstFieldType(JoinPair) == Pair);
-    comptime expect(!isFormattedStruct(Pair));
-    comptime expect(!isFormattedStruct(structFirstFieldType(Pair)));
-    const pair = try ParserStr(JoinPair)(alloc, "28 499992");
-    expect(pair.a == 28);
-    expect(pair.b == 499992);
-}
-
-test "array struct parser" {
+test "parser array struct" {
     var alloc = std.testing.allocator;
     const Pair = struct {
         a: u32,
@@ -241,8 +220,27 @@ test "array struct parser" {
     expect(pair_slice[0].a == 6 and pair_slice[1].a == 999);
 }
 
-test "unsafe copy?" {
+test "fmt parser slice" {
     var alloc = std.testing.allocator;
+    const q = try ParserStr(Join([]u32, " "))(alloc, "1 3 5 3");
+    defer alloc.free(q);
+    expect((q[0] == 1) and (q[1] == 3) and (q[2] == 5) and (q[3] == 3));
+}
+
+test "fmt parser join" {
+    const Pair = struct {
+        a: u32,
+        b: u32,
+    };
+    const JoinPair = Join(Pair, " ");
+    expect(fmt.isFormattedStruct(JoinPair));
+    expect(structFirstFieldType(JoinPair) == Pair);
+    expect(!fmt.isFormattedStruct(Pair));
+    const pair = try ParserStr(JoinPair)(null, "28 499992");
+    expect(pair.a == 28 and pair.b == 499992);
+}
+
+test "cast format unformat" {
     const Pair = struct {
         a: u32,
         b: u32,
@@ -253,10 +251,10 @@ test "unsafe copy?" {
     var ptr = @ptrCast(*Pair, &p2);
     p = ptr.*;
     expect(p.a == 76 and p.b == 99999);
-    //std.mem.copy(Pair, p2, p);
 }
 
-test "join parse" {
+test "fmt parser join nested" {
+    var alloc = std.testing.allocator;
     const Nested = struct {
         c: u32,
         d: u32,
@@ -275,44 +273,16 @@ test "join parse" {
         },
     };
     expect(C.b.c == (Nested{ .c = 2, .d = 45 }).c);
-    expect(!isFormattedStruct(PContainer));
-    expect(!isFormattedStruct(Container));
+    expect(!fmt.isFormattedStruct(PContainer));
+    expect(!fmt.isFormattedStruct(Container));
     const p = try ParserStr(Join([]u16, ":"))(alloc, "2323:78:333");
     defer alloc.free(p);
     expect(p.len == 3);
     expect((p[0] == 2323) and (p[1] == 78) and (p[2] == 333));
 }
 
-test "AoC day4" {
-    // const HeightUnit = enum { in, cm };
-    // const EyeColor = enum {
-    //     amb, blu, brn, gry, grn, hzl, oth
-    // };
-    // const Field = union(enum) {
-    //     byr: u32,
-    //     eyr: u32,
-    //     iyr: u32,
-    //     hgt: u32,
-    //     hgt_unit: HeightUnit,
-    //     hcl: str,
-    //     ecl: EyeColor,
-    //     pid: str,
-    //     cid: void,
-    //     unk,
-    // };
-    // TODO tagged unions!
-    // const Passport = struct {
-    //     fields: [7]fields,
-    //     cid: str,
-    // };
-
-    // const valid1 =
-    //     \\ecl:gry pid:860033327 eyr:2020 hcl:#fffffd
-    //     \\byr:1937 iyr:2017 cid:147 hgt:183cm
-    // ;
-}
-
 test "AoC day7" {
+    var alloc = std.testing.allocator;
     const Color = struct {
         n: ?u32,
         modifier: str,
@@ -321,7 +291,6 @@ test "AoC day7" {
     };
 
     const LHSParser = Parser(Color);
-    var alloc = std.testing.allocator;
     const example_1 = "dotted tomato"; // .n and .ignore_bags are absent
     var iter_lhs: TokenIterator = std.mem.tokenize(example_1, " ");
     const LHS_parsed = try LHSParser(alloc, &iter_lhs);
@@ -334,36 +303,19 @@ test "AoC day7" {
     const RHS_parsed: []Color = try Parser([]Color)(alloc, &iter);
     defer alloc.free(RHS_parsed);
     expect(RHS_parsed.len == 3);
+    expect(RHS_parsed[0].n.? == 4);
     expect(streql(RHS_parsed[0].modifier, "dark"));
     expect(streql(RHS_parsed[0].color, "tomato"));
+    expect(RHS_parsed[1].n.? == 3);
     expect(streql(RHS_parsed[1].modifier, "plaid"));
     expect(streql(RHS_parsed[1].color, "orange"));
+    expect(RHS_parsed[2].n.? == 5);
     expect(streql(RHS_parsed[2].modifier, "posh"));
     expect(streql(RHS_parsed[2].color, "teal"));
-
-    // more complicated (not in the original AoC data)
-    const example_3 = "dark potato bags, plaid yellow 5 posh duck bags.";
-    iter = std.mem.tokenize(example_3, " ");
-    const RHS2_parsed: []Color = try Parser([]Color)(alloc, &iter);
-    defer alloc.free(RHS2_parsed);
-    expect(RHS2_parsed.len == 3);
-    expect(RHS2_parsed[0].n == null);
-    expect(streql(RHS2_parsed[0].modifier, "dark"));
-    expect(streql(RHS2_parsed[0].color, "potato"));
-    expect(RHS2_parsed[1].n == null);
-    expect(streql(RHS2_parsed[1].modifier, "plaid"));
-    expect(streql(RHS2_parsed[1].color, "yellow"));
-    // TODO ambiguity in the struct, can't do anything?
-    // how does it work for regex, for example, when it's ambiguous?
-    //expect(RHS2_parsed[1].ignore_bags == null);
-    //expect(RHS2_parsed[2].n.? == 5);
-    //expect(streql(RHS2_parsed[2].modifier, "posh"));
-    //expect(streql(RHS2_parsed[2].color, "duck"));
 }
 
-test "nesting AoC day8 (modified)" {
-    var alloc = std.testing.allocator;
-
+test "AoC day8 (modified)" {
+    const alloc = std.testing.allocator;
     const Opcode = enum {
         nop,
         acc,
@@ -378,8 +330,9 @@ test "nesting AoC day8 (modified)" {
     const PInstruction = Join(Instruction, " ");
     // parse unknown number of space-separated instructions, separated by \n:
     const PInstructions = Join([]PInstruction, "\n");
-    // give a name to the data without formatting
-    //const Instructions = Unformat(PInstructions);
+    // name the data structure without formatting
+    const Instructions = Unformat(PInstructions);
+    expect(Instructions == []Instruction);
     const parser = ParserStr(PInstructions);
 
     const raw_instructions =
@@ -387,34 +340,16 @@ test "nesting AoC day8 (modified)" {
         \\acc +10
         \\jmp +18
         \\nop
-        \\jmp +327
-        \\nop  
-        \\jmp +269
     ;
-    // print("\n", .{});
-    // recursivePrintTypeInfoStruct(Instruction, 0);
-    // print("Other\n", .{});
-    // recursivePrintTypeInfoStruct(Unformat(PInstruction), 0);
-
-    //expect(Unformat(PInstruction) == Instruction);
-    //expect(Unformat([]PInstruction) == []Instruction);
-    //recursivePrintTypeInfoStruct(Unformat(PType), 0);
-    //expect(Unformat(PType) == []Instruction);
-    // TODO doesn't work consistently, bugs with print at comptime?
-    //recursivePrintTypeInfoStruct(PType, 0);
-
     const parsed = try parser(alloc, raw_instructions);
-    //const parsed: Unformat(PType) = try parser(alloc, raw_instructions);
     defer alloc.free(parsed);
-    // print("{}\n", .{parsed});
-    print("{}\n", .{parsed[5]});
-    //expect(parsed.len == 7);
+    expect(parsed.len == 4);
+    expect(parsed[2].opcode == .jmp and parsed[2].operand.? == 18);
+    expect(parsed[3].opcode == .nop and parsed[3].operand == null);
 }
 
-test "nesting" {
-    //const In3 = struct {
-    //    a: u32,
-    //};
+test "caveat type names" {
+    var alloc = std.testing.allocator;
     const In2 = struct {
         a: u32,
         b: u32,
@@ -423,33 +358,42 @@ test "nesting" {
         a: u32,
         b: Join(In2, "-"),
     };
-    const In0 = struct {
-        a: u32,
-        b: Join(In1, "/"),
+    const ParsableData = Join(In1, " ");
+    // problem is here: the type created by Unformat will recursively look
+    // for formatted structs (depth-first search). It finds that In2 has no
+    // nested formatted structs, i.e. Unformat(Join(In2, "-")) = In2.
+    // therefore, it doesn't need to change the type of In1.b.
+    // However, when it tries to unformat ParsableData, it notices that
+    // Unformat(Join(In1, " ")) != In1 (b/c in the new type, In1.b is of type
+    // In2). Therefore, it has to create a new type.
+    // This new type will be identical to In1 in all respects, if we
+    // recursively compare the TypeInfos of the structures.
+    // But the pointer .fields at the level of In1 differ!
+    const Data = Unformat(ParsableData);
+    const parser = ParserStr(ParsableData);
+    const parsed = try parser(alloc, "0 1-2");
+    const manually_created = Data{
+        .a = 0,
+        .b = .{
+            .a = 1,
+            .b = 2,
+        },
     };
-    const U = Unformat(Join(In0, " "));
-    var alloc = std.testing.allocator;
-    //print("\n", .{});
-    //recursivePrintTypeInfoStruct(In0, 0);
-    //print("\n", .{});
-    //recursivePrintTypeInfoStruct(Unformat(In0), 0);
-
-    const parser = ParserStr(Join(In0, " "));
-    const parsed = try parser(alloc, "0 1/2-3");
-    recursivePrintTypeInfoStruct(U, 0);
-    print("-----------------\n", .{});
-    recursivePrintTypeInfoStruct(@TypeOf(parsed), 0);
-    print("-----------------\n", .{});
-    const parsed2 = try parser(alloc, "0 1/2-3");
-    recursivePrintTypeInfoStruct(@TypeOf(parsed2), 0);
-    print("{}\n", .{parsed2});
+    // this gives struct names like this:
+    // print("\n{}\n", .{parsed});
+    // print("{}\n", .{manually_created});
 }
 
-// const ErrorSet = error{Error1};
-// fn a() ErrorSet!void {
-//     return ErrorSet.Error1;
-// }
-//
-// test "nesting a" {
-//     try a();
-// }
+test "caveat no-backtrack" {
+    var alloc = std.testing.allocator;
+    const NoBacktrack = struct {
+        a: ?u32,
+        b: u32,
+    };
+    const parser = ParserStr(NoBacktrack);
+    // problem: since the parser never backtracks, if it fails to match the
+    // second integer, it returns an error. With backtracking it would return
+    // a failure, would decide a is null, would go back to its prevous state
+    // where the token is not consumed and store it in b.
+    expectError(Error.EndIterError, parser(alloc, "91733"));
+}
