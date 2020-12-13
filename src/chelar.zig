@@ -1,5 +1,6 @@
 const std = @import("std");
 const enum_parser = @import("enum_parser.zig");
+const fmt = @import("fmt_structs.zig");
 const expect = std.testing.expect;
 const expectError = std.testing.expectError;
 const str = []const u8;
@@ -9,72 +10,43 @@ const TokenIterator = std.mem.TokenIterator;
 const tools = @import("tools.zig");
 const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
 
-pub const TypeError = error{TypeError};
-
 pub const Error = error{
     ParseError,
     ParseIntError,
     EndIterError,
     NotImplementedError,
+    DelimByteError,
 } || Allocator.Error || enum_parser.Error;
 
-pub fn isFormattedStruct(comptime T: type) bool {
-    if (@typeInfo(T) != .Struct)
-        return false;
-    inline for (@typeInfo(T).Struct.decls) |decl, i| {
-        if (decl.data.Var == ParseStruct) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn recursiveUnformatCast(comptime T: type, parsed: *T, unformatted: *Unformat(T)) void {
-    const typeinfo_T = @typeInfo(T);
-    switch (typeinfo_T) {
-        .Struct => {
-            // go in depth first
-            comptime const is_formatted_struct = isFormattedStruct(T);
-            if (!is_formatted_struct) {
-                inline for (typeinfo_T.Struct.fields) |f, i| {
-                    // this is not a formatted struct, so both formatted and
-                    // unformatted structs should have the same field names
-                    const corresponding_field_name = @typeInfo(Unformat(T)).Struct.fields[i].name;
-                    comptime expect(streql(f.name, corresponding_field_name));
-                    comptime expect(T == @TypeOf(parsed.*));
-                    recursiveUnformatCast(
-                        f.field_type,
-                        &@field(parsed.*, f.name),
-                        &@field(unformatted.*, f.name),
-                    );
-                }
-            }
-            if (is_formatted_struct) {
-                const formatted_child = @ptrCast(
-                    *Unformat(T),
-                    &(parsed.*.child),
-                );
-                unformatted.* = formatted_child.*;
-            }
-        },
-        else => {
-            unformatted.* = parsed.*;
-        },
-    }
-}
-
-pub fn ParserStr(comptime T: type) (fn (*Allocator, str) Error!Unformat(T)) {
+pub fn ParserStr(comptime T: type) (fn (?*Allocator, str) Error!Unformat(T)) {
     return struct {
         const wrappedParseFn = Parser(T);
-        fn parseWrap(alloc: *Allocator, val: str) Error!Unformat(T) {
-            // TODO is there a never used ASCII char? I use ETX=0x03...
-            const delim_bytes: []const u8 = ([1]u8{0x03})[0..];
-            //const delim_bytes: []const u8 = "gaga"[0..];
-            var iter = std.mem.tokenize(val, delim_bytes);
-            var parsed: T = try wrappedParseFn(alloc, &iter);
-            // TODO cast to Unformat(T)... ou la la! make that safe somehow?
+        fn parseWrap(alloc: ?*Allocator, val: str) Error!Unformat(T) {
+            // in order to re-use the Parser(T) provided function when parsing
+            // *formatted* structs, we want a dummy iterator that returns only
+            // one token: the entire string. That's why I call tokenize with a
+            // delimiter that's almost never used in practice: 0x0. So if 0x0
+            // is encountered within a string (*not* at the last position, as
+            // in a C string), it raises an error.
+            // TODO: How to do create a dummy TokenIterator without the usual
+            // .next() function?
+            const delim_bytes: []const u8 = ([1]u8{0x0})[0..];
+            var dummy_iter = std.mem.tokenize(val, delim_bytes);
+            if (dummy_iter.next()) |token| {
+                if (token.len != val.len) {
+                    return Error.DelimByteError;
+                }
+            } else {
+                return Error.DelimByteError;
+            }
+            // re-init token iterator:
+            dummy_iter = std.mem.tokenize(val, delim_bytes);
+            var parsed: T = try wrappedParseFn(alloc, &dummy_iter);
+            // TODO:
+            // 1. not sure if this is safe,
+            // 2. is there a way to copy data without realloc an Unformat(T)?
             var unformatted: Unformat(T) = undefined;
-            recursiveUnformatCast(T, &parsed, &unformatted);
+            castUnformatRecur(T, &parsed, &unformatted);
             return unformatted;
         }
     }.parseWrap;
@@ -83,18 +55,21 @@ pub fn ParserStr(comptime T: type) (fn (*Allocator, str) Error!Unformat(T)) {
 /// A parser function for a variety of complicated, nested types known at
 /// compile time. Currently, it supports structs, slices, arrays, integers,
 /// []const u8, and enums.
-pub fn Parser(comptime T: type) (fn (*Allocator, *TokenIterator) Error!T) {
+pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
     return struct {
-        fn parse(alloc: *Allocator, iter: *TokenIterator) Error!T {
-            return parseB(T, alloc, iter);
+        fn parse(opt_alloc: ?*Allocator, iter: *TokenIterator) Error!T {
+            return parseRecur(T, opt_alloc, iter);
         }
 
-        fn parseB(comptime t: type, alloc: *Allocator, iter: *TokenIterator) Error!t {
+        fn parseRecur(comptime t: type, opt_alloc: ?*Allocator, iter: *TokenIterator) Error!t {
             var parsed: t = undefined;
             //print("> {}\n", .{@typeInfo(t)});
             const iter_index_backup = iter.index;
             if (t == str) {
-                return iter.next() orelse Error.EndIterError;
+                const v = iter.next();
+                // for debugging with assembly.
+                // const v = @call(.{ .modifier = .never_inline }, iter.next, .{});
+                return v orelse Error.EndIterError;
             }
             comptime var typeinfo = @typeInfo(t);
             switch (typeinfo) {
@@ -102,15 +77,16 @@ pub fn Parser(comptime T: type) (fn (*Allocator, *TokenIterator) Error!T) {
                     if (iter.next()) |val| {
                         const parsed_int: t = std.fmt.parseInt(t, val, 10) catch {
                             iter.index = iter_index_backup;
-                            return Error.ParseIntError;
+                            return Error.ParseError;
                         };
                         return parsed_int;
+                    } else {
+                        return Error.EndIterError;
                     }
-                    return Error.EndIterError;
                 },
                 .Optional => {
                     comptime var child_type = typeinfo.Optional.child;
-                    return parseB(child_type, alloc, iter) catch return null;
+                    return parseRecur(child_type, opt_alloc, iter) catch return null;
                 },
                 .Enum => {
                     const enumParser = try enum_parser.EnumParser(t);
@@ -126,9 +102,9 @@ pub fn Parser(comptime T: type) (fn (*Allocator, *TokenIterator) Error!T) {
                         var sub_iter: std.mem.TokenIterator = undefined;
                         if (iter.next()) |val| {
                             sub_iter = t.tokenize(val);
-                            //return parseB(t.child_type, alloc, &sub_iter) catch return Error.ParseError;
+                            //return parseRecur(t.child_type, alloc, &sub_iter) catch return Error.ParseError;
                             return t{
-                                .child = try parseB(t.child_type, alloc, &sub_iter), //catch return Error.ParseError,
+                                .child = try parseRecur(t.child_type, opt_alloc, &sub_iter), //catch return Error.ParseError,
                             };
                         } else {
                             return Error.ParseError;
@@ -137,24 +113,23 @@ pub fn Parser(comptime T: type) (fn (*Allocator, *TokenIterator) Error!T) {
                     } else {
                         inline for (typeinfo.Struct.fields) |f, i| {
                             comptime var subtype = f.field_type;
-                            @field(parsed, f.name) = (try parseB(subtype, alloc, iter));
+                            @field(parsed, f.name) = (try parseRecur(subtype, opt_alloc, iter));
                         }
                     }
                 },
                 .Pointer => {
                     if (typeinfo.Pointer.size == .Slice) {
                         comptime const subtype = typeinfo.Pointer.child;
-                        comptime const max_len = 10000;
-                        // TODO use std container instead of hideous max_len
-                        var array: [max_len]subtype = ([_]subtype{undefined} ** max_len);
-                        var i: u32 = 0;
+                        var array = std.ArrayList(subtype).init(opt_alloc.?);
                         while (true) {
-                            array[i] = parseB(subtype, alloc, iter) catch break;
-                            i += 1;
+                            const e = parseRecur(subtype, opt_alloc, iter) catch break;
+                            try array.append(e);
                         }
-                        var sliced: []subtype = try alloc.alloc(subtype, i);
-                        std.mem.copy(subtype, sliced, array[0..i]);
-                        return sliced;
+                        return array.toOwnedSlice();
+                        // TODO Could we turn opt_alloc to be comptime known?
+                        // thus we could check that when the type
+                        // require dynamic memory allocation at comptime,
+                        // alloc is not null? Or is it a misuse of optionals?
                     } else {
                         return Error.NotImplementedError;
                     }
@@ -168,7 +143,7 @@ pub fn Parser(comptime T: type) (fn (*Allocator, *TokenIterator) Error!T) {
                     var array: [len]subtype = [_]subtype{undefined} ** len;
                     var i: u32 = 0;
                     while (i < len) : (i += 1) {
-                        array[i] = parseB(subtype, alloc, iter) catch break;
+                        array[i] = parseRecur(subtype, opt_alloc, iter) catch break;
                     }
                     return array;
                 },
@@ -266,88 +241,6 @@ test "array struct parser" {
     expect(pair_slice[0].a == 6 and pair_slice[1].a == 999);
 }
 
-/// Flag indicating that struct is a "formatting struct", i.e. that it
-/// encapsulates various informations for parsing
-const ParseStruct = enum {
-    parse_struct,
-};
-
-/// Encapsulates a complex type like slice, array or struct into another struct
-/// that defines how it can be parsed. It simply defines the separator
-/// between items of the slices/arrays, or fields of the structs.
-pub fn Join(comptime T: type, comptime sep: str) TypeError!type {
-    const tinfo = @typeInfo(T);
-    switch (tinfo) {
-        .Struct, .Pointer, .Array => {},
-        else => return TypeError.TypeError,
-    }
-    return struct {
-        child: T,
-        const parse_struct: ParseStruct = .parse_struct;
-        const child_type: type = T;
-
-        fn tokenize(val: str) std.mem.TokenIterator {
-            // TODO optional separator for character-level parsing?
-            return std.mem.tokenize(val, sep);
-        }
-    };
-}
-
-test "join errors" {
-    expectError(TypeError.TypeError, Join(u32, " "));
-}
-
-/// Recursively de-encapsulate format structs obtained using formatters like Join
-pub fn Unformat(comptime T: type) type {
-    comptime var typeinfo = @typeInfo(T);
-    switch (typeinfo) {
-        .Struct => {
-            comptime const is_parse_struct: bool = isFormattedStruct(T);
-            if (is_parse_struct) {
-                return Unformat(T.child_type);
-            } else {
-                const StructField = std.builtin.TypeInfo.StructField;
-                comptime const n_fields = typeinfo.Struct.fields.len;
-                comptime var fields: [n_fields]StructField = undefined;
-                std.mem.copy(StructField, fields[0..], typeinfo.Struct.fields);
-                // recursively Unformat the fields
-                var fields_have_changed: bool = false;
-                inline for (fields) |f, i| {
-                    const unfmt_type = Unformat(f.field_type);
-                    fields[i].field_type = unfmt_type;
-                    if (f.field_type != unfmt_type) { // type has been modified:
-                        fields_have_changed = true;
-                        fields[i].default_value = null; //nested_type
-                    }
-                }
-                if (!fields_have_changed) {
-                    return T;
-                }
-                const s = std.builtin.TypeInfo.Struct{
-                    .layout = typeinfo.Struct.layout,
-                    .fields = fields[0..],
-                    .decls = typeinfo.Struct.decls, //new_decls[0..],
-                    .is_tuple = typeinfo.Struct.is_tuple,
-                };
-                const nested_type = @Type(std.builtin.TypeInfo{
-                    .Struct = s,
-                });
-
-                return nested_type;
-            }
-        },
-        .Pointer => {
-            // Create a new type info where the child type is unformatted
-            const tp = typeinfo.Pointer;
-            var s: std.builtin.TypeInfo.Pointer = tp;
-            s.child = Unformat(tp.child);
-            return @Type(std.builtin.TypeInfo{ .Pointer = s });
-        },
-        .Int => return T,
-        else => return T,
-    }
-}
-
 test "unsafe copy?" {
     var alloc = std.testing.allocator;
     const Pair = struct {
@@ -363,22 +256,7 @@ test "unsafe copy?" {
     //std.mem.copy(Pair, p2, p);
 }
 
-test "join" {
-    var alloc = std.testing.allocator;
-    // we need to be able to create the "Join" type directly and with the same syntax
-    // so that adding tokenizer information does not disturb the normal use
-    //const u32_: type = Join(u32, " ");
-    const u32_joined: type = Join([]u32, " ");
-    expect(isFormattedStruct(u32_joined));
-    const ufmt_u: type = Unformat(u32_joined);
-    expect(ufmt_u == []u32);
-    //TODO!!!
-    //const parsed = ParserStr(u32_joined)(alloc, "5321");
-    //print("{}\n", .{parsed});
-
-    const ufmt: type = Unformat(u32);
-    expect(ufmt == u32);
-
+test "join parse" {
     const Nested = struct {
         c: u32,
         d: u32,
