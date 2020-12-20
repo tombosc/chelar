@@ -42,17 +42,17 @@ test "AoC day8 (modified)" {
 
 # Details
 
-To be more precise, here is the correspondence between types and regex/formal grammar rules:
+To be more precise, here is the correspondence between Zig types and regex/formal grammar rules:
 
-- `?T`: regex `T?`
-- `[]T`: regex `T*`
-- `[19]T`: regex `T{19}`
-- `enum { a, b, c }`: regex `(a|b|c)`
-- `const X = struct { a: T, b: U}`: formal grammar rule `X → TU` (**but** does not handle recursive languages, i.e. setting the type `U` to `*X` for instance)
+- Optional `?T`: regex `T?`
+- Slice `[]T`: regex `T*`
+- Array `[19]T`: regex `T{19}`
+- Enum `enum { a, b, c }`: regex `(a|b|c)`
+- Struct `const X = struct { a: T, b: U }`: formal grammar rule `X → TU` (**but** does not handle recursive languages, i.e. setting the type `U` to `*X` for instance)
+- Tagged union `const X = union(enum) { a: U, b: V }`: formal grammar rule `X → U | V` (non-recursive either)
 
-The parser is a very naive and WIP [recursive descent parser](https://en.wikipedia.org/wiki/Recursive_descent_parser) with **many** caveats:
+The parser is a very naive [recursive descent parser](https://en.wikipedia.org/wiki/Recursive_descent_parser) with caveats:
 
-- does not backtrack, so it cannot even parse data type `struct { a: ?u32, b: u32 }` correctly
 - does not deal with runtime errors gracefully
 - does not deal with compile time errors of types. For instance, `Join(u32, " ")` should fail but doesn't. That's because either we write `struct { a: try Join(u32, " "), ...` and it segfaults, or we have to declare all intermediary types used nested.
 
@@ -61,7 +61,6 @@ Right now, the way it is implemented is that `Join([]u32, sep)` creates a new ty
 We could have more cool stuff, like:
 
 - Proper error handling, not sure how yet.
-- Tagged unions.
 - Handle recursive languages by dealing with pointers.
 - A new type transformer `Ignore(T)`, corresponding to data that we don't want to capture. For example, if a struct has a first field `a: Ignore(u32)`, it means we need to parse it but do not store it.
 - A new type transformer `Wrap(T, '{', '}')`.

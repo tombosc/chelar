@@ -65,6 +65,8 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
             return parseRecur(T, opt_alloc, iter);
         }
 
+        /// Parse a struct of type t. fields[i] == 1 iff we ignore the optional.
+        /// If it fails, the caller can backtrack!
         fn parseStructOptions(
             opt_alloc: ?*Allocator,
             comptime n_fields: u32,
@@ -81,15 +83,15 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 comptime var subtype = f.field_type;
                 skip = false;
                 if (@typeInfo(subtype) == .Optional) {
+                    // unwrap Optionals here, to allow for backtracking.
                     if (options[i] == 0) {
                         subtype = @typeInfo(subtype).Optional.child;
                     } else {
                         @field(parsed, f.name) = null;
-                        // TODO: use continue (bugged right now?)
+                        // TODO: could be simplified using continue! but not
+                        // supported with comptime now, it seems.
                         skip = true;
                     }
-                } else if (@typeInfo(subtype) == .Union) {
-                    return Error.NotImplementedError;
                 }
                 if (!skip) {
                     const parse_attempt = parseRecur(subtype, opt_alloc, iter) catch {
@@ -194,6 +196,26 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                         return Error.NotImplementedError;
                     }
                 },
+                .Union => {
+                    if (typeinfo.Union.tag_type) |tag_type| {
+                        comptime const n_values = typeinfo.Union.fields.len;
+                        comptime const fields = typeinfo.Union.fields;
+                        const backup_iter = iter.index;
+                        comptime var i = 0;
+                        var res: t = undefined;
+                        inline while (i < n_values) : (i += 1) {
+                            iter.index = backup_iter;
+                            comptime var subtype = fields[i].field_type;
+                            const parsed_subtype = parseRecur(?subtype, opt_alloc, iter) catch undefined;
+                            if (parsed_subtype) |p| {
+                                return @unionInit(t, fields[i].name, p);
+                            }
+                        }
+                        return Error.ParseError;
+                    } else {
+                        return Error.NotImplementedError;
+                    }
+                },
                 .Array => {
                     comptime const subtype = typeinfo.Array.child;
                     if (typeinfo.Array.sentinel) |v| {
@@ -230,16 +252,18 @@ fn structFirstFieldType(comptime T: type) type {
 
 /// For each field in the struct, return the number of possible choices - 1:
 /// - optionals: 2-1=1 choices (present or absent),
-/// - tagged unions: N-1 choices,
+/// (cancelled: - tagged unions: N-1 choices)
 /// - all the other types: 0 choices.
 fn computeStructMaxNValues(comptime n_fields: u32, comptime typeinfo: std.builtin.TypeInfo) [n_fields]u32 {
     var n_options = [_]u32{0} ** n_fields;
     inline for (typeinfo.Struct.fields) |f, i| {
         if (@typeInfo(f.field_type) == .Optional) {
             n_options[i] = 1;
-        } else if (@typeInfo(f.field_type) == .Union) {
-            n_options[i] = f.field_type.tag_type.?.fields.len;
         }
+        //else if (@typeInfo(f.field_type) == .Union) {
+        //n_options[i] = @typeInfo(f.field_type).tag_type.?.fields.len;
+        //    n_options[i] = @typeInfo(f.field_type).Union.fields.len;
+        //}
     }
     return n_options;
 }
@@ -355,6 +379,88 @@ test "fmt parser slice" {
     const q = try ParserStr(Join([]u32, " "))(alloc, "1 3 5 3");
     defer alloc.free(q);
     expect((q[0] == 1) and (q[1] == 3) and (q[2] == 5) and (q[3] == 3));
+}
+
+test "parser optional" {
+    const parser = Parser(?u32);
+    const q = try parser(null, &std.mem.tokenize("", " "));
+    expect(q == null);
+}
+
+test "parser union" {
+    var alloc = std.testing.allocator;
+    const VanillaUnion = union {
+        a: u32,
+        b: str,
+    };
+    var parser1 = Parser(VanillaUnion);
+    expectError(Error.NotImplementedError, parser1(alloc, &std.mem.tokenize("32", "\t")));
+    var parser2 = Parser([]VanillaUnion);
+    expectError(Error.NotImplementedError, parser2(alloc, &std.mem.tokenize("32 blabla", " ")));
+    var parser3 = Parser([2]VanillaUnion);
+    expectError(Error.NotImplementedError, parser3(alloc, &std.mem.tokenize("32 blabla", " ")));
+    // TODO
+    const TaggedUnion = union(enum) {
+        a: u32,
+        b: str,
+    };
+    const tinfo = @typeInfo(TaggedUnion);
+    // print("{}\n", .{tinfo});
+    // print("{}\n", .{tinfo.Union.fields.len});
+    // print("{}\n", .{@typeInfo(tinfo.Union.tag_type.?)});
+    // print("{}\n", .{@typeInfo(tinfo.Union.tag_type.?).Enum.fields.len});
+    const parser = Parser(TaggedUnion);
+    const parsed = try parser(alloc, &std.mem.tokenize("3", " "));
+    expect(parsed.a == 3);
+    const parsed2 = try parser(alloc, &std.mem.tokenize("xyzzyx", " "));
+    expect(streql(parsed2.b, "xyzzyx"));
+    const slice_parser = Parser([]TaggedUnion);
+    const parsed3 = try slice_parser(alloc, &std.mem.tokenize("chaussette 33", " "));
+    defer alloc.free(parsed3);
+    expect(streql(parsed3[0].b, "chaussette"));
+    expect(parsed3[1].a == 33);
+
+    const array_parser = Parser([5]TaggedUnion);
+    const parsed4 = try slice_parser(alloc, &std.mem.tokenize("gism 99 endless blockades 33393", " "));
+    defer alloc.free(parsed4);
+    expect(streql(parsed4[0].b, "gism"));
+    expect(parsed4[1].a == 99);
+    expect(streql(parsed4[2].b, "endless"));
+    expect(streql(parsed4[3].b, "blockades"));
+    expect(parsed4[4].a == 33393);
+}
+
+test "parser nested union" {
+    var alloc = std.testing.allocator;
+    const E = enum {
+        ok,
+        not_ok,
+        meh,
+    };
+    const TaggedUnion = union(enum) {
+        a: u32,
+        b: E, // order matters
+        c: str,
+    };
+    const S = struct {
+        a: u32,
+        b: TaggedUnion,
+        c: ?TaggedUnion,
+    };
+
+    const parser = ParserStr(Join([]Join(S, " "), "\n"));
+    const ex =
+        \\8 ok
+        \\92 883
+        \\222221 delicious
+        \\21 mmm meh
+    ;
+    const parsed = try parser(alloc, ex);
+    defer alloc.free(parsed);
+    expect(parsed[0].a == 8 and parsed[0].b.b == E.ok and parsed[0].c == null);
+    expect(parsed[1].a == 92 and parsed[1].b.a == 883);
+    expect(parsed[2].a == 222221 and streql(parsed[2].b.c, "delicious"));
+    expect(parsed[3].a == 21 and streql(parsed[3].b.c, "mmm") and parsed[3].c.?.b == E.meh);
 }
 
 test "fmt parser join" {
