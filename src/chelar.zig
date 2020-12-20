@@ -127,7 +127,7 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 },
                 .Optional => {
                     comptime var child_type = typeinfo.Optional.child;
-                    return try parseRecur(child_type, opt_alloc, iter);
+                    return parseRecur(child_type, opt_alloc, iter) catch null;
                 },
                 .Enum => {
                     const enumParser = try enum_parser.EnumParser(t);
