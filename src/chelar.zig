@@ -65,11 +65,49 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
             return parseRecur(T, opt_alloc, iter);
         }
 
+        fn parseStructOptions(
+            opt_alloc: ?*Allocator,
+            comptime n_fields: u32,
+            comptime t: type,
+            comptime fields: []const std.builtin.TypeInfo.StructField,
+            options: [n_fields]u32,
+            iter: *TokenIterator,
+        ) Error!t {
+            var skip = false;
+            var failed = false;
+            var parsed: t = undefined;
+            inline for (fields) |f, i| {
+                comptime const typeinfo = @typeInfo(t);
+                comptime var subtype = f.field_type;
+                skip = false;
+                if (@typeInfo(subtype) == .Optional) {
+                    if (options[i] == 0) {
+                        subtype = @typeInfo(subtype).Optional.child;
+                    } else {
+                        @field(parsed, f.name) = null;
+                        // TODO: use continue (bugged right now?)
+                        skip = true;
+                    }
+                } else if (@typeInfo(subtype) == .Union) {
+                    return Error.NotImplementedError;
+                }
+                if (!skip) {
+                    const parse_attempt = parseRecur(subtype, opt_alloc, iter) catch {
+                        failed = true;
+                        return Error.ParseError;
+                        //break :blk;
+                    };
+                    @field(parsed, f.name) = parse_attempt;
+                    skip = false;
+                }
+            }
+            return parsed;
+        }
+
         fn parseRecur(comptime t: type, opt_alloc: ?*Allocator, iter: *TokenIterator) Error!t {
             var parsed: t = undefined;
             //print("> {}\n", .{@typeInfo(t)});
-            const iter_index_backup = iter.index;
-            if (t == str) {
+            if (t == str) { // TODO move to switch()
                 const v = iter.next();
                 // for debugging with assembly.
                 // const v = @call(.{ .modifier = .never_inline }, iter.next, .{});
@@ -80,7 +118,6 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 .Int => {
                     if (iter.next()) |val| {
                         const parsed_int: t = std.fmt.parseInt(t, val, 10) catch {
-                            iter.index = iter_index_backup;
                             return Error.ParseError;
                         };
                         return parsed_int;
@@ -90,7 +127,7 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 },
                 .Optional => {
                     comptime var child_type = typeinfo.Optional.child;
-                    return parseRecur(child_type, opt_alloc, iter) catch return null;
+                    return try parseRecur(child_type, opt_alloc, iter);
                 },
                 .Enum => {
                     const enumParser = try enum_parser.EnumParser(t);
@@ -103,22 +140,35 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 .Struct => {
                     comptime const is_fmt = fmt.isFormattedStruct(t);
                     if (is_fmt) {
+                        // TODO call t.parse
                         var sub_iter: std.mem.TokenIterator = undefined;
                         if (iter.next()) |val| {
                             sub_iter = t.tokenize(val);
-                            //return parseRecur(t.child_type, alloc, &sub_iter) catch return Error.ParseError;
                             return t{
-                                .child = try parseRecur(t.child_type, opt_alloc, &sub_iter), //catch return Error.ParseError,
+                                .child = try parseRecur(t.child_type, opt_alloc, &sub_iter),
                             };
                         } else {
                             return Error.ParseError;
-                            //iter.index = iter_index_backup;
                         }
                     } else {
-                        inline for (typeinfo.Struct.fields) |f, i| {
-                            comptime var subtype = f.field_type;
-                            @field(parsed, f.name) = (try parseRecur(subtype, opt_alloc, iter));
+                        const n_fields = typeinfo.Struct.fields.len;
+                        comptime const n_options = computeStructMaxNValues(n_fields, typeinfo);
+                        comptime const n_combinations = nFieldsCombinations(n_options[0..]);
+                        comptime const fields = typeinfo.Struct.fields;
+                        const backup_iter = iter.index;
+                        var comb_i: u32 = 0;
+                        // try to parse with every possible combination of
+                        // optional and union tagswhen it fails, backtrack
+                        // (rewind iterator) and try the next combination
+                        while (comb_i < n_combinations) : (comb_i += 1) {
+                            iter.index = backup_iter;
+                            const options = intToFieldsOptions(n_fields, comb_i, n_options);
+                            parsed = parseStructOptions(opt_alloc, n_fields, t, fields, options, iter) catch {
+                                continue;
+                            };
+                            return parsed;
                         }
+                        return Error.ParseError;
                     }
                 },
                 .Pointer => {
@@ -126,7 +176,13 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                         comptime const subtype = typeinfo.Pointer.child;
                         var array = std.ArrayList(subtype).init(opt_alloc.?);
                         while (true) {
-                            const e = parseRecur(subtype, opt_alloc, iter) catch break;
+                            const e = parseRecur(subtype, opt_alloc, iter) catch |e| {
+                                if (e == Error.NotImplementedError) {
+                                    return e;
+                                } else {
+                                    break;
+                                }
+                            };
                             try array.append(e);
                         }
                         return array.toOwnedSlice();
@@ -147,7 +203,13 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                     var array: [len]subtype = [_]subtype{undefined} ** len;
                     var i: u32 = 0;
                     while (i < len) : (i += 1) {
-                        array[i] = parseRecur(subtype, opt_alloc, iter) catch break;
+                        array[i] = parseRecur(subtype, opt_alloc, iter) catch |e| {
+                            if (e == Error.NotImplementedError) {
+                                return e;
+                            } else {
+                                break;
+                            }
+                        };
                     }
                     return array;
                 },
@@ -164,6 +226,74 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
 
 fn structFirstFieldType(comptime T: type) type {
     return @typeInfo(T).Struct.fields[0].field_type;
+}
+
+/// For each field in the struct, return the number of possible choices - 1:
+/// - optionals: 2-1=1 choices (present or absent),
+/// - tagged unions: N-1 choices,
+/// - all the other types: 0 choices.
+fn computeStructMaxNValues(comptime n_fields: u32, comptime typeinfo: std.builtin.TypeInfo) [n_fields]u32 {
+    var n_options = [_]u32{0} ** n_fields;
+    inline for (typeinfo.Struct.fields) |f, i| {
+        if (@typeInfo(f.field_type) == .Optional) {
+            n_options[i] = 1;
+        } else if (@typeInfo(f.field_type) == .Union) {
+            n_options[i] = f.field_type.tag_type.?.fields.len;
+        }
+    }
+    return n_options;
+}
+
+/// Encode an integer i in the basis defined by n_options. See examples:
+/// examples:
+/// - if n_options = {7, ..., 7}, then it is base 8 encoding.
+/// - if n_options = {2, 0, 1}, then intToFieldsOptions will return:
+///     * i = 0: {0, 0, 0}
+///     * i = 1: {0, 0, 1}
+///     * i = 2: {1, 0, 0}
+///     * i = 3: {1, 0, 1}
+///     * i = 4: {2, 0, 0}
+///     * i = 5: {2, 0, 1}
+fn intToFieldsOptions(comptime n: u32, i: u32, n_options: [n]u32) [n]u32 {
+    var options = [_]u32{0} ** n;
+    var multiples: [n]u32 = undefined;
+    // multiples[i] = prod_{j<i} (n_options[j]+1)
+    multiples[0] = 1;
+    var k: u32 = 1;
+    while (k < n) : (k += 1) {
+        multiples[k] = (n_options[k - 1] + 1) * multiples[k - 1];
+    }
+    var j: u32 = n - 1;
+    var rest: u32 = i;
+    while (true) : (j -= 1) {
+        if (rest < multiples[j]) {
+            options[j] = 0;
+        } else {
+            options[j] = rest / multiples[j];
+            rest = rest % multiples[j];
+        }
+        if (j == 0)
+            break;
+    }
+    return options;
+}
+
+fn nFieldsCombinations(n_options: []const u32) u32 {
+    var prod: u32 = 1;
+    for (n_options) |e|
+        prod *= (e + 1);
+    return prod;
+}
+
+test "helper int 2 field" {
+    const n_options: [5]u32 = .{ 1, 0, 1, 5, 3 };
+    const n_combinations = nFieldsCombinations(&n_options);
+    expect(n_combinations == 96);
+    const u = intToFieldsOptions(n_options.len, n_combinations - 1, n_options);
+    expect(std.mem.eql(u32, &u, &n_options));
+    const v = intToFieldsOptions(n_options.len, 9, n_options);
+    const res: [5]u32 = .{ 1, 0, 0, 2, 0 };
+    expect(std.mem.eql(u32, &res, &v));
 }
 
 // tests
@@ -289,18 +419,29 @@ test "AoC day7" {
         color: str,
         ignore_bags: ?str,
     };
+    //comptime const n_fields = @typeInfo(Color).Struct.fields.len;
+    //comptime const n_options = computeStructMaxNValues(n_fields, @typeInfo(Color));
+    //for (n_options) |o| print("{}\n", .{o});
+    //const n_combinations = nFieldsCombinations(n_options[0..]);
+    //var comb_i: u32 = 0;
+    //while (comb_i < n_combinations) : (comb_i += 1) {
+    //    const options = intToFieldsOptions(n_fields, comb_i, n_options);
+    //    for (options) |o| print("{}-", .{o});
+    //    print("\n", .{});
+    //}
 
-    const LHSParser = Parser(Color);
+    const LHS_parser = Parser(Color);
     const example_1 = "dotted tomato"; // .n and .ignore_bags are absent
     var iter_lhs: TokenIterator = std.mem.tokenize(example_1, " ");
-    const LHS_parsed = try LHSParser(alloc, &iter_lhs);
+    const LHS_parsed = try LHS_parser(alloc, &iter_lhs);
     expect(streql(LHS_parsed.modifier, "dotted"));
     expect(streql(LHS_parsed.color, "tomato"));
 
+    const slice_parser = Parser([]Color);
     const example_2 = "4 dark tomato bags, 3 plaid orange bags, 5 posh teal bags.";
     // all the fields are present here.
     var iter = std.mem.tokenize(example_2, " ");
-    const RHS_parsed: []Color = try Parser([]Color)(alloc, &iter);
+    const RHS_parsed = try slice_parser(alloc, &iter);
     defer alloc.free(RHS_parsed);
     expect(RHS_parsed.len == 3);
     expect(RHS_parsed[0].n.? == 4);
@@ -348,6 +489,24 @@ test "AoC day8 (modified)" {
     expect(parsed[3].opcode == .nop and parsed[3].operand == null);
 }
 
+test "simple backtrack" {
+    var alloc = std.testing.allocator;
+    const NoBacktrack = struct {
+        a: ?u32,
+        b: u32,
+    };
+    const parser = Parser(NoBacktrack);
+    const v = try parser(alloc, &std.mem.tokenize("3 4554444", " "));
+    expect(v.a.? == 3 and v.b == 4554444);
+
+    const u = try parser(alloc, &std.mem.tokenize("91733", " "));
+    expect(u.b == 91733);
+
+    const parser_str = ParserStr(NoBacktrack);
+    const w = try parser_str(alloc, "91733");
+    expect(w.b == 91733);
+}
+
 test "caveat type names" {
     var alloc = std.testing.allocator;
     const In2 = struct {
@@ -382,18 +541,4 @@ test "caveat type names" {
     // this gives struct names like this:
     // print("\n{}\n", .{parsed});
     // print("{}\n", .{manually_created});
-}
-
-test "caveat no-backtrack" {
-    var alloc = std.testing.allocator;
-    const NoBacktrack = struct {
-        a: ?u32,
-        b: u32,
-    };
-    const parser = ParserStr(NoBacktrack);
-    // problem: since the parser never backtracks, if it fails to match the
-    // second integer, it returns an error. With backtracking it would return
-    // a failure, would decide a is null, would go back to its prevous state
-    // where the token is not consumed and store it in b.
-    expectError(Error.EndIterError, parser(alloc, "91733"));
 }
