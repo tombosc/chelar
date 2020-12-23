@@ -8,7 +8,8 @@ const streql = tools.streql;
 /// into a new struct that defines how it can be parsed.
 /// If a struct has this enum in its declarations, it is a formatted struct.
 const FormattedStruct = enum {
-    formatted_struct,
+    join_struct,
+    match_struct,
 };
 
 /// Join(T, sep) returns a formatted struct given a type T.
@@ -24,7 +25,7 @@ pub fn Join(comptime T: type, comptime sep: str) type {
     // }
     return struct {
         child: T,
-        const fmt_struct: FormattedStruct = .formatted_struct;
+        pub const fmt_struct: FormattedStruct = .join_struct;
         pub const child_type: type = T;
 
         pub fn tokenize(val: str) std.mem.TokenIterator {
@@ -33,13 +34,27 @@ pub fn Join(comptime T: type, comptime sep: str) type {
     };
 }
 
+/// A formatted struct that matches match of type T without storing any data.
+/// Useful to assert that some syntactic element (keyword, brackets, ...) is
+/// present.
+pub fn Match(comptime T: type, comptime match: T) type {
+    return struct {
+        child: void = undefined, // no data; only match
+        pub const fmt_struct: FormattedStruct = .match_struct;
+        pub const to_match: T = match;
+        pub const child_type: type = T;
+    };
+}
+
 /// Returns true if the struct T contains any nested formatted struct.
 pub fn isFormattedStruct(comptime T: type) bool {
     if (@typeInfo(T) != .Struct)
         return false;
     inline for (@typeInfo(T).Struct.decls) |decl, i| {
-        if (decl.data.Var == FormattedStruct) {
-            return true;
+        if (decl.data == .Var) {
+            if (decl.data.Var == FormattedStruct) {
+                return true;
+            }
         }
     }
     return false;

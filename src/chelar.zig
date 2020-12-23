@@ -9,9 +9,11 @@ const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
 const tools = @import("tools.zig");
 const streql = tools.streql;
+const generic_eql = tools.generic_eql;
 const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
 
 pub const Join = fmt.Join;
+pub const Match = fmt.Match;
 pub const Unformat = fmt.Unformat;
 
 pub const Error = error{
@@ -106,7 +108,11 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
             return parsed;
         }
 
-        fn parseRecur(comptime t: type, opt_alloc: ?*Allocator, iter: *TokenIterator) Error!t {
+        fn parseRecur(
+            comptime t: type,
+            opt_alloc: ?*Allocator,
+            iter: *TokenIterator,
+        ) Error!t {
             var parsed: t = undefined;
             //print("> {}\n", .{@typeInfo(t)});
             if (t == str) { // TODO move to switch()
@@ -141,14 +147,22 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                 },
                 .Struct => {
                     comptime const is_fmt = fmt.isFormattedStruct(t);
-                    if (is_fmt) {
-                        // TODO call t.parse
+                    if (is_fmt and t.fmt_struct == .join_struct) {
+                        // TODO call t.parse?
                         var sub_iter: std.mem.TokenIterator = undefined;
                         if (iter.next()) |val| {
                             sub_iter = t.tokenize(val);
                             return t{
                                 .child = try parseRecur(t.child_type, opt_alloc, &sub_iter),
                             };
+                        } else {
+                            return Error.ParseError;
+                        }
+                    } else if (is_fmt and t.fmt_struct == .match_struct) {
+                        // const iter_backup = iter.index;
+                        const maybe_matched = try parseRecur(t.child_type, opt_alloc, iter);
+                        if (generic_eql(t.child_type, maybe_matched, t.to_match)) {
+                            return t{};
                         } else {
                             return Error.ParseError;
                         }
@@ -254,7 +268,10 @@ fn structFirstFieldType(comptime T: type) type {
 /// - optionals: 2-1=1 choices (present or absent),
 /// (cancelled: - tagged unions: N-1 choices)
 /// - all the other types: 0 choices.
-fn computeStructMaxNValues(comptime n_fields: u32, comptime typeinfo: std.builtin.TypeInfo) [n_fields]u32 {
+fn computeStructMaxNValues(
+    comptime n_fields: u32,
+    comptime typeinfo: std.builtin.TypeInfo,
+) [n_fields]u32 {
     var n_options = [_]u32{0} ** n_fields;
     inline for (typeinfo.Struct.fields) |f, i| {
         if (@typeInfo(f.field_type) == .Optional) {
@@ -474,6 +491,28 @@ test "fmt parser join" {
     expect(!fmt.isFormattedStruct(Pair));
     const pair = try ParserStr(JoinPair)(null, "28 499992");
     expect(pair.a == 28 and pair.b == 499992);
+}
+
+test "fmt parser match" {
+    const A = struct {
+        _0: Match(str, "A"),
+        a: u32,
+    };
+    const parser = Parser(A);
+    const parsed = try parser(null, &std.mem.tokenize("A 33", " "));
+    expect(parsed.a == 33);
+
+    const B = struct {
+        _0: Match(str, "B"),
+        a: str,
+    };
+    const U = union(enum) {
+        a: A,
+        b: B,
+    };
+    const parser2 = Parser(U);
+    const parsed2 = try parser2(null, &std.mem.tokenize("B bobo", " "));
+    expect(streql("bobo", parsed2.b.a));
 }
 
 test "cast format unformat" {
