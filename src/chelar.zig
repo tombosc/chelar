@@ -9,12 +9,13 @@ const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
 const tools = @import("tools.zig");
 const streql = tools.streql;
-const generic_eql = tools.generic_eql;
 const recursivePrintTypeInfoStruct = tools.recursivePrintTypeInfoStruct;
 
 pub const Join = fmt.Join;
 pub const Match = fmt.Match;
+pub const Wrap = fmt.Wrap;
 pub const Unformat = fmt.Unformat;
+const countNonMatchFields = fmt.countNonMatchFields;
 
 pub const Error = error{
     ParseError,
@@ -23,6 +24,25 @@ pub const Error = error{
     NotImplementedError,
     DelimByteError,
 } || Allocator.Error || enum_parser.Error;
+
+pub fn ParserU(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!Unformat(T)) {
+    return struct {
+        const wrappedParseFn = Parser(T);
+        fn parseWrap(alloc: ?*Allocator, iter: *TokenIterator) Error!Unformat(T) {
+            var parsed: T = try wrappedParseFn(alloc, iter);
+            if (@typeInfo(T) == .Pointer) {
+                var unformatted = try alloc.?.create(@typeInfo(Unformat(T)).Pointer.child);
+                print("create1:{}\n", .{@ptrToInt(unformatted)});
+                fmt.castUnformatRecur(T, &parsed, &unformatted);
+                return unformatted;
+            } else {
+                var unformatted: Unformat(T) = undefined;
+                fmt.castUnformatRecur(T, &parsed, &unformatted);
+                return unformatted;
+            }
+        }
+    }.parseWrap;
+}
 
 pub fn ParserStr(comptime T: type) (fn (?*Allocator, str) Error!Unformat(T)) {
     return struct {
@@ -125,6 +145,7 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
             switch (typeinfo) {
                 .Int => {
                     if (iter.next()) |val| {
+                        print("parse int:{}\n", .{val});
                         const parsed_int: t = std.fmt.parseInt(t, val, 10) catch {
                             return Error.ParseError;
                         };
@@ -158,12 +179,18 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                         } else {
                             return Error.ParseError;
                         }
+                        // } else if (is_fmt and t.fmt_struct == .wrap_struct) {
+                        //     return t{
+                        //         .child = try parseRecur(t.child_type, opt_alloc, iter),
+                        //     };
                     } else if (is_fmt and t.fmt_struct == .match_struct) {
-                        // const iter_backup = iter.index;
-                        const maybe_matched = try parseRecur(t.child_type, opt_alloc, iter);
-                        if (generic_eql(t.child_type, maybe_matched, t.to_match)) {
+                        const iter_backup = iter.index;
+                        const maybe_matched = try parseRecur(str, opt_alloc, iter);
+                        print("cur:{},to_match:{}\n", .{ maybe_matched, t.to_match });
+                        if (streql(maybe_matched, t.to_match)) {
                             return t{};
                         } else {
+                            iter.index = iter_backup;
                             return Error.ParseError;
                         }
                     } else {
@@ -177,19 +204,21 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                         // optional and union tagswhen it fails, backtrack
                         // (rewind iterator) and try the next combination
                         while (comb_i < n_combinations) : (comb_i += 1) {
-                            iter.index = backup_iter;
+                            // iter.index = backup_iter;
                             const options = intToFieldsOptions(n_fields, comb_i, n_options);
                             parsed = parseStructOptions(opt_alloc, n_fields, t, fields, options, iter) catch {
+                                iter.index = backup_iter;
                                 continue;
                             };
                             return parsed;
                         }
+                        iter.index = backup_iter;
                         return Error.ParseError;
                     }
                 },
                 .Pointer => {
+                    comptime const subtype = typeinfo.Pointer.child;
                     if (typeinfo.Pointer.size == .Slice) {
-                        comptime const subtype = typeinfo.Pointer.child;
                         var array = std.ArrayList(subtype).init(opt_alloc.?);
                         while (true) {
                             const e = parseRecur(subtype, opt_alloc, iter) catch |e| {
@@ -207,7 +236,15 @@ pub fn Parser(comptime T: type) (fn (?*Allocator, *TokenIterator) Error!T) {
                         // require dynamic memory allocation at comptime,
                         // alloc is not null? Or is it a misuse of optionals?
                     } else {
-                        return Error.NotImplementedError;
+                        var ret = try opt_alloc.?.create(subtype);
+                        print("create2:{}\n", .{@ptrToInt(ret)});
+                        //print("create2:{}\n", .{ret});
+                        ret.* = parseRecur(subtype, opt_alloc, iter) catch |e| {
+                            print("destroy2:{}\n", .{@ptrToInt(ret)});
+                            opt_alloc.?.destroy(ret);
+                            return e;
+                        };
+                        return ret;
                     }
                 },
                 .Union => {
@@ -404,6 +441,133 @@ test "parser optional" {
     expect(q == null);
 }
 
+test "parser recursive base" {
+    var alloc = std.testing.allocator;
+    const ChainedList = struct {
+        _0: Match("("),
+        val: u32,
+        next: ?*@This(),
+        _1: Match(")"),
+
+        pub fn deinit(list: *const @This(), alloc_: *std.mem.Allocator) void {
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                var next: ?*@This() = cur.next;
+                opt_cur = next;
+                alloc_.destroy(cur);
+            }
+        }
+        pub fn sum(list: *const @This()) u32 {
+            var acc: u32 = 0;
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                acc += cur.val;
+                opt_cur = cur.next;
+            }
+            return acc;
+        }
+    };
+    const parser = Parser(*ChainedList);
+    const list = try parser(
+        alloc,
+        &std.mem.tokenize("( 3 ( 32 ( 5 ) ) )", " "),
+    );
+    defer list.deinit(alloc);
+    expect(list.sum() == 3 + 32 + 5);
+    print("{}\n", .{list});
+}
+
+test "parser recursive unformat" {
+    var alloc = std.testing.allocator;
+    const ChainedList = struct {
+        _0: Match("("),
+        val: u32,
+        next: ?*@This(),
+        _1: Match(")"),
+
+        pub fn deinit(list: *const @This(), alloc_: *std.mem.Allocator) void {
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                var next = cur.next;
+                opt_cur = next;
+                alloc_.destroy(cur);
+            }
+        }
+        pub fn sum(list: *const @This()) u32 {
+            var acc: u32 = 0;
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                acc += cur.val;
+                opt_cur = cur.next;
+            }
+            return acc;
+        }
+    };
+    const UCL = Unformat(ChainedList);
+    comptime expect(UCL != ChainedList);
+    // verify that Unformat removed the Match
+    const l1 = UCL{ .val = 333, .next = null };
+    print("{}\n", .{l1});
+    const parser = Parser(*UCL);
+    const list = try parser(
+        alloc,
+        &std.mem.tokenize("( 3 ( 32 ( 5 ) ) )", " "),
+    );
+    //defer list.deinit(alloc);
+    print("{}\n", .{list});
+    //const parser = Parser(*ChainedList);
+}
+
+test "fmt parser recursive wrap" {
+    var alloc = std.testing.allocator;
+    const ChainedList = struct {
+        val: u32,
+        next: ?*@This(),
+
+        pub fn deinit(list: *const @This(), alloc_: *std.mem.Allocator) void {
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                var next: ?*@This() = cur.next;
+                opt_cur = next;
+                print("destroy cur:{} ; next:{}\n", .{ @ptrToInt(cur), @ptrToInt(next) });
+                alloc_.destroy(cur);
+            }
+        }
+        pub fn sum(list: *const @This()) u32 {
+            var acc: u32 = 0;
+            var opt_cur: ?*const @This() = list;
+            while (opt_cur) |cur| {
+                acc += cur.val;
+                opt_cur = cur.next;
+            }
+            return acc;
+        }
+    };
+    const WChainedList = Wrap(*ChainedList, "(", ")");
+    const parser = ParserU(WChainedList);
+    const list1 = try parser(
+        alloc,
+        // &std.mem.tokenize("( 3 ( 32 ( 5 ) ) )", " "),
+        &std.mem.tokenize("( 5 )", " "),
+    );
+    print("Parsed correctly: {}\n", .{list1});
+    // parser:
+    // 1. dynamically alloc WChainedList
+    // 2. dynamically try to alloc a new element and fail, so backtrack
+    // 3. create a new Unformatted object and return that with casts, SKIPPING the *Wrap!!!
+
+    defer list1.deinit(alloc);
+    const list = try parser(
+        alloc,
+        // &std.mem.tokenize("( 3 ( 32 ( 5 ) ) )", " "),
+        &std.mem.tokenize("( 3 ( 32 ) )", " "),
+    );
+    defer list.deinit(alloc);
+    print("Parsed correctly: {}\n", .{list});
+    // print("{}\n", .{list});
+    // expect(list.sum() == 3 + 32 + 5);
+}
+
 test "parser union" {
     var alloc = std.testing.allocator;
     const VanillaUnion = union {
@@ -416,7 +580,6 @@ test "parser union" {
     expectError(Error.NotImplementedError, parser2(alloc, &std.mem.tokenize("32 blabla", " ")));
     var parser3 = Parser([2]VanillaUnion);
     expectError(Error.NotImplementedError, parser3(alloc, &std.mem.tokenize("32 blabla", " ")));
-    // TODO
     const TaggedUnion = union(enum) {
         a: u32,
         b: str,
@@ -493,9 +656,9 @@ test "fmt parser join" {
     expect(pair.a == 28 and pair.b == 499992);
 }
 
-test "fmt parser match" {
+test "parser match" {
     const A = struct {
-        _0: Match(str, "A"),
+        _0: Match("A"),
         a: u32,
     };
     const parser = Parser(A);
@@ -503,16 +666,19 @@ test "fmt parser match" {
     expect(parsed.a == 33);
 
     const B = struct {
-        _0: Match(str, "B"),
+        _0: Match("B"),
         a: str,
+        _1: Match("C"),
     };
     const U = union(enum) {
         a: A,
         b: B,
     };
     const parser2 = Parser(U);
-    const parsed2 = try parser2(null, &std.mem.tokenize("B bobo", " "));
+    const parsed2 = try parser2(null, &std.mem.tokenize("B bobo C", " "));
     expect(streql("bobo", parsed2.b.a));
+    expectError(Error.ParseError, parser2(null, &std.mem.tokenize("B bobo", " ")));
+    expectError(Error.ParseError, parser2(null, &std.mem.tokenize("bobo C", " ")));
 }
 
 test "cast format unformat" {

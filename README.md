@@ -60,8 +60,8 @@ Right now, the way it is implemented is that `Join([]u32, sep)` creates a new ty
 
 We could have more cool stuff, like:
 
-- Proper error handling, not sure how yet.
-- Handle recursive languages by dealing with pointers.
+- Proper error handling, not sure how yet
+- Comptime verbose mode
 - A new type transformer `Ignore(T)`, corresponding to data that we don't want to capture. For example, if a struct has a first field `a: Ignore(u32)`, it means we need to parse it but do not store it.
 - A new type transformer `Wrap(T, '{', '}')`.
 - Serialization? Should be quite straightforward.
