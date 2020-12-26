@@ -49,13 +49,12 @@ Zig type | Regex | Grammar rule
 ---|---|---
 `u8`, `u16`, ... | `[0-9]` |
 `str` | `.*` |
-`enum { a, b, c }` | <code>(a&#124;b&#124;c)</code> |
----|---|---
+`enum { a, b, c }` | `(a\|b\|c)` |
 `?T` | `T?` |
 `[]T` | `T*` |
 `[19]T` | `T{19}` |
 `const X = struct { a: T, b: U }` | | `X -> TU` 
-`const X = union(enum) { a: T, b: U }` | | <code>X -> T &#124; U</code>
+`const X = union(enum) { a: T, b: U }` | | `X -> T \| U`
 
 You can also parse recursive languages, for instance:
 
