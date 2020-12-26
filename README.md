@@ -47,12 +47,14 @@ test "AoC day8 (modified)" {
 
 Zig type | Regex | Grammar rule
 ---|---|---
+`u8`, `u16`, ... | `[0-9]` |
+`str` | `.*` |
 `?T` | `T?` |
 `[]T` | `T*` |
 `[19]T` | `T{19}` |
-`enum { a, b, c }` | `(a|b|c)` |
-`const X = struct { a: T, b: U }` | | `X → TU` 
-`const X = union(enum) { a: U, b: V }` | | `X → U | V`
+`enum { a, b, c }` | ```(a|b|c)``` |
+`const X = struct { a: T, b: U }` | | `X -> TU` 
+`const X = union(enum) { a: T, b: U }` | | `X -> T | U`
 
 You can also parse recursive languages, for instance:
 
